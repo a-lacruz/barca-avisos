@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .cache/
+
+# documentos de control del proyecto (solo locales, decision del usuario)
+AGENTS.md
+STATE.md
+PENDING.md
+HANDOFF_HISTORY.md
