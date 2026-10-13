@@ -136,6 +136,70 @@ def emoji_competicion(comp: str) -> str:
     return c[1] if c else EMOJI_POR_DEFECTO
 
 
+def _parecido(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    return _norm(a) == _norm(b) or _similitud(_tokens(a), _tokens(b)) >= 0.6
+
+
+# --------------------------------------------------------------------------
+# Posiciones en la clasificacion (ESPN: resumen del partido -> tabla)
+# --------------------------------------------------------------------------
+
+_posiciones_cache = {}
+
+
+def posiciones_de(partido: dict) -> dict:
+    """{'local': '1', 'visitante': '8'} o {} si la competicion es eliminatoria."""
+    if partido["uid"] in _posiciones_cache:
+        return _posiciones_cache[partido["uid"]]
+    resultado = {}
+    comp = competicion_de(partido["competicion"])
+    if comp and comp[4]:
+        try:
+            endpoint, fecha = comp[4], partido["inicio"].strftime("%Y%m%d")
+            sb = json.loads(descargar(
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/{endpoint}"
+                f"/scoreboard?dates={fecha}").decode())
+            evento, nombres = None, {}
+            for ev in sb.get("events", []):
+                compet = (ev.get("competitions") or [{}])[0]
+                candidato, cuadra = {}, True
+                for c in compet.get("competitors", []):
+                    nombre = (c.get("team") or {}).get("displayName", "")
+                    objetivo = (partido["local"] if c.get("homeAway") == "home"
+                                else partido["visitante"])
+                    if not _parecido(nombre, objetivo):
+                        cuadra = False
+                    candidato[nombre] = ("local" if c.get("homeAway") == "home"
+                                         else "visitante")
+                if cuadra:
+                    evento, nombres = ev, candidato
+                    break
+            if evento:
+                resumen = json.loads(descargar(
+                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{endpoint}"
+                    f"/summary?event={evento['id']}").decode())
+                entradas = []
+                for g in (resumen.get("standings") or {}).get("groups", []):
+                    entradas += (g.get("standings") or {}).get("entries", [])
+                for e in entradas:
+                    equipo = e.get("team")
+                    if equipo in nombres:
+                        rank = next((int(st["value"]) for st in e.get("stats", [])
+                                     if st.get("name") == "rank"), None)
+                        if rank:
+                            resultado[nombres[equipo]] = str(rank)
+        except Exception as e:  # noqa: BLE001 - sin tabla no se avisa igual
+            print(f"  (aviso: no se pudo leer la clasificacion: {e})")
+    _posiciones_cache[partido["uid"]] = resultado
+    return resultado
+
+
+def con_posicion(nombre: str, pos: str) -> str:
+    return f"{nombre} ({pos}º)" if pos else nombre
+
+
 # --------------------------------------------------------------------------
 # Escudos (CDN de ESPN) con emparejamento difuso de nombres
 # --------------------------------------------------------------------------
@@ -397,15 +461,17 @@ def telegram_foto(ruta: str, caption: str):
 
 
 def enviar_aviso(partido: dict, minutos, catalogo):
-    emoji = emoji_competicion(partido["competicion"])
     hora = texto_lisboa(partido["inicio"])
+    pos = posiciones_de(partido)
+    equipos = (f"{con_posicion(partido['local'], pos.get('local'))}"
+               f" vs {con_posicion(partido['visitante'], pos.get('visitante'))}")
     if minutos is None:
-        cabecera = f"{emoji} ¡El partido ya ha empezado!"
+        cabecera = "⚽ ¡El partido ya ha empezado!"
         pie = f"Empezó a las {hora} hora de Lisboa."
     else:
-        cabecera = f"{emoji} El Barça juega en {minutos} minutos"
+        cabecera = f"⚽ El Barça juega en {minutos} minutos"
         pie = f"Empieza a las {hora} hora de Lisboa."
-    caption = f"{cabecera}\n\U0001f3d5 {partido['local']} vs {partido['visitante']}\n{pie}"
+    caption = f"{cabecera}\n{equipos}\n{pie}"
 
     tarjeta = componer_tarjeta(partido, catalogo, minutos)
     if tarjeta:
