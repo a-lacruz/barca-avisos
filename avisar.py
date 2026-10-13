@@ -483,14 +483,14 @@ def main() -> int:
     avisados = estado.setdefault("avisados", {})
     enviados = 0
 
-    if "--test" in sys.argv:
+    if "--test" in sys.argv or os.environ.get("PRUEBA", "").lower() == "true":
         sig = next((p for p in partidos if p["inicio"] > ahora), None)
         if not sig:
             print("No hay proximos partidos.")
             return 0
         restan = int((sig["inicio"] - ahora).total_seconds() // 60)
         enviar_aviso(sig, restan, catalogo)
-        print("  (modo test: sin marcar el estado)")
+        print("  (modo prueba: sin marcar el estado)")
         return 0
 
     for p in partidos:

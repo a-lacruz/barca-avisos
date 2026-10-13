@@ -17,7 +17,12 @@ on:
     - cron: "55 18 20 10 *"
     - cron: "15 19 20 10 *"
     # CRON-FIN
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      prueba:
+        description: "Enviar un aviso de prueba sin marcar el estado"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -47,6 +52,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MINUTOS_AVISO: "60"
+          PRUEBA: ${{ inputs.prueba }}
         run: python avisar.py
 
       - name: Guardar estado y cron
