@@ -513,6 +513,14 @@ def main() -> int:
     with open(ESTADO_PATH, "w", encoding="utf-8") as f:
         json.dump(estado, f, ensure_ascii=False, indent=2)
 
+    # "latido": al cambiar la fecha se genera un commit diario, lo que impide
+    # que GitHub desactive los workflows programados por inactividad del repo
+    latido = ahora.strftime("%Y-%m-%d")
+    if estado.get("ultima_comprobacion") != latido:
+        estado["ultima_comprobacion"] = latido
+        with open(ESTADO_PATH, "w", encoding="utf-8") as f:
+            json.dump(estado, f, ensure_ascii=False, indent=2)
+
     cron = generar_cron(partidos, ahora)
     cambiado = actualizar_workflow(cron)
     print(f"Ejecuciones programadas: {len(cron)}" + (" (cron actualizado)" if cambiado else ""))
