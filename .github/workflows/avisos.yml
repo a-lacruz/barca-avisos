@@ -1,0 +1,47 @@
+name: Avisos del FC Barcelona
+
+on:
+  schedule:
+    # cada 30 minutos (minuto 3 y 33 para evitar la congestion de los :00)
+    - cron: "3,33 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: avisos-barca
+  cancel-in-progress: false
+
+jobs:
+  avisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Repositorio
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Comprobar partidos y avisar
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MINUTOS_AVISO: "60"
+        run: python avisar.py
+
+      - name: Guardar estado
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add estado.json
+          if git diff --cached --quiet; then
+            echo "Sin cambios en el estado."
+          else
+            git commit -m "Estado de avisos $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
