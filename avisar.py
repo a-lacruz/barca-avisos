@@ -26,8 +26,8 @@ ICAL_URL = os.environ.get(
     "ICAL_URL",
     "https://ics.ecal.com/ecal-sub/6aceb1a56051400002e3e8d5/FCBarcelona.ics",
 )
-MARGEN_TARDIO = 90   # cuantos minutos atras se mira el calendario
 MARGEN_INICIO = 25   # tras el inicio, aun tiene sentido avisar "¡ha empezado!"
+MARGEN_FIN = 360     # ventana para resultado y enlace tras el inicio (6 h)
 ESTADO_PATH = os.environ.get("ESTADO_PATH", "estado.json")
 WORKFLOW_PATH = os.environ.get("WORKFLOW_PATH", ".github/workflows/avisos.yml")
 CACHE_DIR = os.environ.get("CACHE_DIR", ".cache")
@@ -35,15 +35,30 @@ HORIZON_DIAS = 10  # cuantos dias hacia delante se programan ejecuciones
 
 # escalera de avisos: (id, minutos antes del inicio, con tarjeta imagen)
 # el cron se genera a partir de aqui; cambiar tiempos = editar solo esta tabla
+# tfin es negativo: minutos DESPUES del inicio (el partido ya ha acabado)
 ETAPAS = [
     ("t90", 90, True),
     ("t60", 60, False),
     ("t15", 15, False),
     ("t0", 0, False),
+    ("tfin", -125, False),
 ]
 
+# si al tfin aun no hay enlace al resumen, se vuelve a mirar en estos minutos
+# tras el inicio (el aviso de resultado ya salio; el enlace llegaria aparte)
+REINTENTOS_ENLACE = [155, 210, 300, 360]
+
 # desplazamientos (minutos respecto al inicio del partido) en los que se ejecuta
-DESLAZES = [-antes for _, antes, _ in ETAPAS]
+DESLAZES = [-antes for _, antes, _ in ETAPAS] + REINTENTOS_ENLACE
+
+# --------------------------------------------------------------------------
+# Resumenes en YouTube (innertube, sin API key): orden de preferencia y filtros# --------------------------------------------------------------------------
+# Descartados tras verificacion (2026-10-14): Diario AS (resumen radio),
+# ESPN Deportes (analisis), Fox Deportes (El Chiringuito), PlanetaSportTV
+# (camaras de espectador). DAZN Portugal: solo visible con IP de Portugal.
+CANALES_RESUMEN = ["fc barcelona", "laliga", "dazn portugal"]
+GEO_SOLO_PORTUGAL = ["dazn portugal"]
+PALABRAS_RESUMEN = ("resumen", "goles", "resumo", "highlights")
 
 # --------------------------------------------------------------------------
 # Competiciones (emoji, nombre corto y logo oficial del CDN de ESPN)
@@ -154,10 +169,36 @@ def _parecido(a: str, b: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Posiciones en la clasificacion (ESPN: resumen del partido -> tabla)
+# ESPN: evento del partido -> clasificacion y resultado final
 # --------------------------------------------------------------------------
 
 _posiciones_cache = {}
+_resultados_cache = {}
+
+
+def _evento_espn(partido: dict):
+    """(endpoint, evento, {nombre_espn: 'local'|'visitante'}) del partido en ESPN."""
+    comp = competicion_de(partido["competicion"])
+    if not comp or not comp[4]:
+        return None
+    endpoint, fecha = comp[4], partido["inicio"].strftime("%Y%m%d")
+    sb = json.loads(descargar(
+        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{endpoint}"
+        f"/scoreboard?dates={fecha}").decode())
+    for ev in sb.get("events", []):
+        compet = (ev.get("competitions") or [{}])[0]
+        candidato, cuadra = {}, True
+        for c in compet.get("competitors", []):
+            nombre = (c.get("team") or {}).get("displayName", "")
+            objetivo = (partido["local"] if c.get("homeAway") == "home"
+                        else partido["visitante"])
+            if not _parecido(nombre, objetivo):
+                cuadra = False
+            candidato[nombre] = ("local" if c.get("homeAway") == "home"
+                                 else "visitante")
+        if cuadra:
+            return endpoint, ev, candidato
+    return None
 
 
 def posiciones_de(partido: dict) -> dict:
@@ -165,45 +206,47 @@ def posiciones_de(partido: dict) -> dict:
     if partido["uid"] in _posiciones_cache:
         return _posiciones_cache[partido["uid"]]
     resultado = {}
-    comp = competicion_de(partido["competicion"])
-    if comp and comp[4]:
-        try:
-            endpoint, fecha = comp[4], partido["inicio"].strftime("%Y%m%d")
-            sb = json.loads(descargar(
+    try:
+        encontrado = _evento_espn(partido)
+        if encontrado:
+            endpoint, evento, nombres = encontrado
+            resumen = json.loads(descargar(
                 f"https://site.api.espn.com/apis/site/v2/sports/soccer/{endpoint}"
-                f"/scoreboard?dates={fecha}").decode())
-            evento, nombres = None, {}
-            for ev in sb.get("events", []):
-                compet = (ev.get("competitions") or [{}])[0]
-                candidato, cuadra = {}, True
-                for c in compet.get("competitors", []):
-                    nombre = (c.get("team") or {}).get("displayName", "")
-                    objetivo = (partido["local"] if c.get("homeAway") == "home"
-                                else partido["visitante"])
-                    if not _parecido(nombre, objetivo):
-                        cuadra = False
-                    candidato[nombre] = ("local" if c.get("homeAway") == "home"
-                                         else "visitante")
-                if cuadra:
-                    evento, nombres = ev, candidato
-                    break
-            if evento:
-                resumen = json.loads(descargar(
-                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{endpoint}"
-                    f"/summary?event={evento['id']}").decode())
-                entradas = []
-                for g in (resumen.get("standings") or {}).get("groups", []):
-                    entradas += (g.get("standings") or {}).get("entries", [])
-                for e in entradas:
-                    equipo = e.get("team")
-                    if equipo in nombres:
-                        rank = next((int(st["value"]) for st in e.get("stats", [])
-                                     if st.get("name") == "rank"), None)
-                        if rank:
-                            resultado[nombres[equipo]] = str(rank)
-        except Exception as e:  # noqa: BLE001 - sin tabla no se avisa igual
-            print(f"  (aviso: no se pudo leer la clasificacion: {e})")
+                f"/summary?event={evento['id']}").decode())
+            entradas = []
+            for g in (resumen.get("standings") or {}).get("groups", []):
+                entradas += (g.get("standings") or {}).get("entries", [])
+            for e in entradas:
+                equipo = e.get("team")
+                if equipo in nombres:
+                    rank = next((int(st["value"]) for st in e.get("stats", [])
+                                 if st.get("name") == "rank"), None)
+                    if rank:
+                        resultado[nombres[equipo]] = str(rank)
+    except Exception as e:  # noqa: BLE001 - sin tabla no se avisa igual
+        print(f"  (aviso: no se pudo leer la clasificacion: {e})")
     _posiciones_cache[partido["uid"]] = resultado
+    return resultado
+
+
+def resultado_de(partido: dict):
+    """{'final': bool, 'local': '1', 'visitante': '4'} o None si no hay datos."""
+    if partido["uid"] in _resultados_cache:
+        return _resultados_cache[partido["uid"]]
+    resultado = None
+    try:
+        encontrado = _evento_espn(partido)
+        if encontrado:
+            _, ev, _ = encontrado
+            compet = (ev.get("competitions") or [{}])[0]
+            estado = ((ev.get("status") or {}).get("type") or {}).get("state", "")
+            resultado = {"final": estado == "post"}
+            for c in compet.get("competitors", []):
+                lado = "local" if c.get("homeAway") == "home" else "visitante"
+                resultado[lado] = str(c.get("score", ""))
+    except Exception as e:  # noqa: BLE001
+        print(f"  (aviso: no se pudo leer el resultado: {e})")
+    _resultados_cache[partido["uid"]] = resultado
     return resultado
 
 
@@ -485,12 +528,18 @@ def texto_etapa(partido: dict, eid: str, minutos, pos: dict) -> str:
         return f"⏳ Falta un cuarto de hora: {equipos}, {hora} hora de Lisboa."
     comp = competicion_de(partido["competicion"])
     extra = f" ({comp[2]})" if comp else ""
+    if eid == "tfin":
+        res = resultado_de(partido) or {}
+        marcador = f"{res.get('local', '?')} - {res.get('visitante', '?')}"
+        return f"🏁 Final: {local} {marcador} {visitante}{extra}"
     return f"🔴 ¡Ha empezado! {local} vs {visitante}{extra}, {hora} hora de Lisboa."
 
 
-def enviar_aviso(partido: dict, eid: str, minutos, catalogo):
-    pos = posiciones_de(partido)
+def enviar_aviso(partido: dict, eid: str, minutos, catalogo, enlace=None):
+    pos = {} if eid == "tfin" else posiciones_de(partido)
     texto = texto_etapa(partido, eid, minutos, pos)
+    if enlace:
+        texto += "\n" + texto_enlace(enlace)
     con_tarjeta = next(t for i, _, t in ETAPAS if i == eid)
     if con_tarjeta:
         tarjeta = componer_tarjeta(partido, catalogo, minutos)
@@ -504,6 +553,118 @@ def enviar_aviso(partido: dict, eid: str, minutos, catalogo):
     else:
         telegram("sendMessage", text=texto)
     print(f"  -> Telegram enviado ({eid}): {texto.splitlines()[0]}")
+
+
+# --------------------------------------------------------------------------
+# Resumen del partido en YouTube (innertube, sin API key)
+# --------------------------------------------------------------------------
+
+_YT_CLAVE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"  # clave publica del sitio
+_YT_VERSION = "2.20261013.00.00"
+
+
+def _yt_post(url: str, datos: dict):
+    req = urllib.request.Request(
+        url, data=json.dumps(datos).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+def _yt_buscar(consulta: str, cantidad: int = 25):
+    """[{id, titulo, canal, retardo}] de una busqueda de YouTube."""
+    url = f"https://www.youtube.com/youtubei/v1/search?key={_YT_CLAVE}"
+    ctx = {"client": {"clientName": "WEB", "clientVersion": _YT_VERSION}}
+    r = _yt_post(url, {"query": consulta, "context": ctx})
+    res = []
+
+    def caminar(o):
+        if isinstance(o, dict):
+            v = o.get("videoRenderer")
+            if v:
+                titulo = "".join(x.get("text", "") for x in
+                                 v.get("title", {}).get("runs", []))
+                canal = ""
+                owner = v.get("ownerText", {}).get("runs", [])
+                if owner:
+                    canal = owner[0].get("text", "")
+                retardo = v.get("publishedTimeText", {}).get("simpleText", "")
+                res.append({"id": v.get("videoId"), "titulo": titulo,
+                            "canal": canal, "retardo": retardo})
+            for x in o.values():
+                caminar(x)
+        elif isinstance(o, list):
+            for x in o:
+                caminar(x)
+
+    caminar(r)
+    return res[:cantidad]
+
+
+def _yt_duracion(video_id: str):
+    """Duracion en segundos, o None si no se pudo leer."""
+    try:
+        url = f"https://www.youtube.com/youtubei/v1/player?key={_YT_CLAVE}"
+        ctx = {"client": {"clientName": "WEB", "clientVersion": _YT_VERSION}}
+        d = _yt_post(url, {"videoId": video_id, "context": ctx})
+        largo = d.get("microformat", {}).get("playerMicroformatRenderer", {}).get(
+            "lengthSeconds")
+        return int(largo) if largo else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _retardo_horas(retardo: str):
+    """'4 hours ago' -> 4.0 ; '1 day ago' -> 24.0 ; '' -> None"""
+    m = re.match(r"(\d+)\s*(minute|hour|day|week)", retardo or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    return {"minute": n / 60, "hour": float(n), "day": n * 24.0,
+            "week": n * 168.0}[m.group(2)]
+
+
+def resumen_youtube(partido: dict):
+    """{id, titulo, canal, geo} del resumen en espanol, o None si no hay.
+
+    Orden de preferencia: CANALES_RESUMEN. Los candidatos de otros canales
+    deben parecerse a un resumen real: los dos equipos en el titulo, palabra
+    de resumen (ES/PT/EN), publicado en las ultimas 24 h y 3+ minutos.
+    """
+    consulta = f"{partido['local']} {partido['visitante']} resumen goles"
+    try:
+        candidatos = _yt_buscar(consulta)
+    except Exception as e:  # noqa: BLE001
+        print(f"  (aviso: busqueda de resumen fallo: {e})")
+        return None
+    toks_local = set(_tokens(partido["local"]))
+    toks_visita = set(_tokens(partido["visitante"]))
+    elegibles = []
+    for c in candidatos:
+        toks_titulo = set(_tokens(c["titulo"]))
+        if not (toks_local <= toks_titulo and toks_visita <= toks_titulo):
+            continue
+        titulo_bajo = c["titulo"].lower()
+        if not any(p in titulo_bajo for p in PALABRAS_RESUMEN):
+            continue
+        horas = _retardo_horas(c["retardo"])
+        if horas is None or horas > 24:
+            continue
+        canal = c["canal"].lower()
+        c["prioridad"] = (CANALES_RESUMEN.index(canal)
+                          if canal in CANALES_RESUMEN else len(CANALES_RESUMEN))
+        elegibles.append(c)
+    elegibles.sort(key=lambda c: c["prioridad"])
+    for c in elegibles[:3]:
+        if (_yt_duracion(c["id"]) or 0) >= 180:
+            c["geo"] = any(g in c["canal"].lower() for g in GEO_SOLO_PORTUGAL)
+            return c
+    return None
+
+
+def texto_enlace(enlace: dict) -> str:
+    geo = " · solo con IP de Portugal" if enlace.get("geo") else ""
+    return f"🎬 Resumen ({enlace['canal']}{geo}):\nhttps://youtu.be/{enlace['id']}"
 
 
 # --------------------------------------------------------------------------
@@ -556,7 +717,7 @@ def main() -> int:
     ahora = datetime.now(timezone.utc)
     print(f"[{ahora:%Y-%m-%d %H:%M} UTC] Actualizando calendario del Barça...")
     partidos = leer_partidos(descargar(ICAL_URL).decode("utf-8", "replace"))
-    partidos = [p for p in partidos if p["inicio"] > ahora - timedelta(minutes=MARGEN_TARDIO)]
+    partidos = [p for p in partidos if p["inicio"] > ahora - timedelta(minutes=MARGEN_FIN)]
     partidos.sort(key=lambda p: p["inicio"])
     print(f"Partidos proximos en el calendario oficial: {len(partidos)}")
 
@@ -587,7 +748,14 @@ def main() -> int:
             i = sys.argv.index("--test") + 1
             if i < len(sys.argv) and sys.argv[i] in [e[0] for e in ETAPAS]:
                 etapa = sys.argv[i]
-        enviar_aviso(sig, etapa, restan, catalogo)
+        enlace = resumen_youtube(sig) if etapa == "tfin" else None
+        if etapa == "tfin" and not (resultado_de(sig) or {}).get("final"):
+            print("  (el partido aun no ha terminado: se muestra el texto, no se envia)")
+            print(f"  [tfin] {texto_etapa(sig, 'tfin', restan, {}).replace(chr(10), ' / ')}")
+            if enlace:
+                print("  [tfin] " + texto_enlace(enlace).replace(chr(10), " / "))
+            return 0
+        enviar_aviso(sig, etapa, restan, catalogo, enlace=enlace)
         print("  (modo prueba: sin marcar el estado)")
         return 0
 
@@ -599,22 +767,50 @@ def main() -> int:
             # estado en formato antiguo (un solo aviso por partido): ya gestionado
             etapas = [e[0] for e in ETAPAS]
         etapas = list(etapas or [])
+        guardado = list(etapas)
         restan = (inicio - ahora).total_seconds() / 60
+
+        # etapas vencidas se marcan para no arrastrarlas (la de final,
+        # hasta que el partido tenga margen de haber terminado)
         if restan <= -MARGEN_INICIO:
-            # demasiado tarde: no se manda "¡ha empezado!" 40 minutos despues
-            avisados[uid] = {"etapas": [e[0] for e in ETAPAS],
-                             "inicio": inicio.isoformat()}
-            continue
+            etapas += [e[0] for e in ETAPAS if e[1] >= 0 and e[0] not in etapas]
+        if restan <= -MARGEN_FIN:
+            etapas += [e[0] for e in ETAPAS if e[1] < 0 and e[0] not in etapas]
+
         pendiente = None
         for eid, antes, _ in ETAPAS:
             if restan <= antes and eid not in etapas:
                 pendiente = eid  # se queda la etapa mas cercana al inicio
-        if pendiente is None:
-            continue
-        enviar_aviso(p, pendiente, int(restan) if restan > 0 else None, catalogo)
-        etapas.append(pendiente)
-        avisados[uid] = {"etapas": etapas, "inicio": inicio.isoformat()}
-        enviados += 1
+        if pendiente == "tfin":
+            res = resultado_de(p)
+            if res and res.get("final"):
+                enlace = resumen_youtube(p)
+                enviar_aviso(p, "tfin", None, catalogo, enlace=enlace)
+                etapas.append("tfin")
+                if enlace:
+                    registro["enlace"] = True
+            # sin datos de final aun: se vuelve a mirar en la proxima ejecucion
+        elif pendiente is not None:
+            enviar_aviso(p, pendiente, int(restan) if restan > 0 else None, catalogo)
+            etapas.append(pendiente)
+
+        # el resultado ya salio pero sin enlace: se completa cuando aparezca
+        # (\"guardado\" evita repetir la busqueda en la misma ejecucion del tfin)
+        if ("tfin" in guardado and not registro.get("enlace")
+                and -MARGEN_FIN < restan <= -125):
+            enlace = resumen_youtube(p)
+            if enlace:
+                texto = (f"🎬 Ya está el resumen del {p['local']} {p['visitante']}:\n"
+                         + texto_enlace(enlace))
+                telegram("sendMessage", text=texto)
+                print(f"  -> Telegram enviado (enlace): https://youtu.be/{enlace['id']}")
+                registro["enlace"] = True
+                enviados += 1
+
+        if etapas != guardado or registro.get("enlace"):
+            registro.update({"etapas": etapas, "inicio": inicio.isoformat()})
+            avisados[uid] = registro
+            enviados += 1 if etapas != guardado else 0
 
     with open(ESTADO_PATH, "w", encoding="utf-8") as f:
         json.dump(estado, f, ensure_ascii=False, indent=2)
