@@ -1,15 +1,29 @@
 # Bot de Notificaciones Juegos del FC Barcelona
 
-Te avisa **1 hora antes de cada partido del primer equipo del FC Barcelona** (LaLiga, Champions, Copa del Rey...), en **hora de Lisboa**, mandándote un mensaje a **Telegram**. Funciona 24/7 con **GitHub Actions**: no necesitas que tu PC esté encendido ni ningún servidor.
+Te avisa de **todos los partidos del primer equipo del FC Barcelona** (LaLiga, Champions, Copa del Rey, amistosos...), en **hora de Lisboa**, mandándote los mensajes a **Telegram**: un aviso grande con tarjeta 90 minutos antes y tres recordatorios cortos. Funciona 24/7 con **GitHub Actions**: no necesitas que tu PC esté encendido ni ningún servidor.
 
 Fuente de datos: el **calendario oficial del FC Barcelona** (fcbarcelona.es, botón "Sincroniza los partidos en tu calendario", servicio eCal).
 
+## Avisos (escalera)
+
+Cada partido genera cuatro avisos, el día del partido:
+
+| Cuándo | Mensaje |
+|---|---|
+| **T-90** | 📷 Tarjeta con los escudos de los dos equipos, el logo de la competición y la hora de Lisboa + texto: `⚽ El Barça juega en 90 minutos / Real Betis (3º) vs FC Barcelona (1º) / Empieza a las 17:30 hora de Lisboa.` |
+| **T-60** | 💬 `⏰ Una hora: Real Betis vs FC Barcelona empieza a las 17:30 (hora de Lisboa).` |
+| **T-15** | 💬 `⏳ Falta un cuarto de hora: Real Betis (3º) vs FC Barcelona (1º), 17:30 hora de Lisboa.` |
+| **T-0** | 💬 `🔴 ¡Ha empezado! Real Betis vs FC Barcelona (LaLiga), 17:30 hora de Lisboa.` |
+
+- Las posiciones salen de la clasificación real (ESPN): LaLiga y fase de grupos de la Champions; en eliminatorias (Copa, Supercopa) no hay tabla y se omiten.
+- Cada aviso es independiente: si uno no se puede enviar (caída puntual de GitHub), el siguiente sale igual.
+- El aviso de inicio solo se envía en los 25 minutos posteriores al comienzo del partido.
+
 ## Cómo funciona
 
-- El workflow se ejecuta **cada 30 minutos** (y a demanda con el botón "Run workflow").
-- Si faltan 60 minutos o menos para un partido y todavía no se avisó, manda el mensaje a Telegram.
-- Si el PC/servidor no estaba disponible a la hora, avisa igualmente cuando el partido ya ha empezado.
+- `avisar.py` lee el calendario oficial (.ics) y **genera su propio cron**: solo se programa en los días de partido (T-90, T-60, T-15 y T-0) más una comprobación diaria (08:07 UTC) que confirma horarios y amplía el horizonte 10 días.
 - Qué avisos ya se mandaron queda guardado en `estado.json`, que el propio workflow actualiza en el repositorio.
+- Los horarios se recalculan solos: si el club cambia el horario de un partido, los avisos se ajustan.
 
 ## Configuración
 
@@ -20,15 +34,29 @@ Secretos del repositorio (Settings → Secrets and variables → Actions):
 | `TELEGRAM_BOT_TOKEN` | Token del bot de @BotFather |
 | `TELEGRAM_CHAT_ID` | Chat id del usuario |
 
-Variables opcionales en `.github/workflows/avisos.yml` (paso "Comprobar partidos y avisar"):
+Variable opcional:
 
-- `MINUTOS_AVISO`: margen de aviso (por defecto 60).
-- `ICAL_URL`: enlace .ics alternativo.
+- `ICAL_URL`: enlace .ics alternativo al calendario oficial.
 
 ## Probar
 
-- En GitHub: pestaña **Actions** → "Avisos del FC Barcelona" → **Run workflow**.
-- En local: `TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python avisar.py --test`
+- En GitHub: pestaña **Actions** → "Avisos del FC Barcelona" → **Run workflow** (marca *prueba*): envía el aviso T-90 con tarjeta sin marcar el estado.
+- En local: `TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python avisar.py --test` — y `--test t60`, `--test t15` o `--test t0` para ver y enviar cada etapa.
+
+## Cambiar los tiempos
+
+La escalera de avisos vive en la tabla `ETAPAS` de `avisar.py`:
+
+```python
+ETAPAS = [
+    ("t90", 90, True),   # id, minutos antes del inicio, con tarjeta imagen
+    ("t60", 60, False),
+    ("t15", 15, False),
+    ("t0", 0, False),
+]
+```
+
+Al cambiarla, el cron y los mensajes se adaptan solos en la siguiente ejecución.
 
 ## Notas
 
@@ -36,3 +64,4 @@ Variables opcionales en `.github/workflows/avisos.yml` (paso "Comprobar partidos
 - GitHub puede retrasar unos minutos la ejecución programada.
 - Si un repositorio está 60 días sin actividad, GitHub desactiva sus workflows programados; aquí los commits diarios de `estado.json` mantienen la actividad.
 - El token y el chat id nunca se guardan en el código: van en los Secretos.
+- Para dibujar las tarjetas se usa Pillow (lo instala el propio workflow).
