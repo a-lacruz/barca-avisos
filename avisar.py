@@ -3,13 +3,15 @@
 Avisos del FC Barcelona por Telegram (GitHub Actions, gratis y 24/7).
 
 - Lee el calendario oficial del Barça (.ics del boton "Sincroniza" de fcbarcelona.es).
-- Avisa por Telegram 1 hora antes de cada partido, en hora de Lisboa, con una
-  tarjeta imagen que lleva los escudos de los dos equipos y el logo de la competicion.
-- Si el PC/servidor no estaba disponible, avisa igualmente cuando el partido ya empezo.
+- Avisa por Telegram en escalera, siempre en hora de Lisboa:
+    T-90  tarjeta con los escudos de los dos equipos y el logo de la competicion.
+    T-60  recordatorio en texto.
+    T-15  recordatorio en texto.
+    T-0   aviso cuando el partido comienza.
 - AUTO-GENERA SU PROPIO CRON: solo se programa en los dias de partido
-  (T-60, T-45, T-30, T-15, T-5 y T+15) mas una comprobacion diaria.
+  (T-90, T-60, T-15 y T-0) mas una comprobacion diaria.
 
-Secretos: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID. Opcional: MINUTOS_AVISO, ICAL_URL.
+Secretos: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID. Opcional: ICAL_URL.
 """
 
 import json
@@ -24,15 +26,24 @@ ICAL_URL = os.environ.get(
     "ICAL_URL",
     "https://ics.ecal.com/ecal-sub/6aceb1a56051400002e3e8d5/FCBarcelona.ics",
 )
-MINUTOS_AVISO = int(os.environ.get("MINUTOS_AVISO", "60"))
-MARGEN_TARDIO = 90
+MARGEN_TARDIO = 90   # cuantos minutos atras se mira el calendario
+MARGEN_INICIO = 25   # tras el inicio, aun tiene sentido avisar "¡ha empezado!"
 ESTADO_PATH = os.environ.get("ESTADO_PATH", "estado.json")
 WORKFLOW_PATH = os.environ.get("WORKFLOW_PATH", ".github/workflows/avisos.yml")
 CACHE_DIR = os.environ.get("CACHE_DIR", ".cache")
 HORIZON_DIAS = 10  # cuantos dias hacia delante se programan ejecuciones
 
+# escalera de avisos: (id, minutos antes del inicio, con tarjeta imagen)
+# el cron se genera a partir de aqui; cambiar tiempos = editar solo esta tabla
+ETAPAS = [
+    ("t90", 90, True),
+    ("t60", 60, False),
+    ("t15", 15, False),
+    ("t0", 0, False),
+]
+
 # desplazamientos (minutos respecto al inicio del partido) en los que se ejecuta
-DESLAZES = [-60, -45, -30, -15, -5, 15]
+DESLAZES = [-antes for _, antes, _ in ETAPAS]
 
 # --------------------------------------------------------------------------
 # Competiciones (emoji, nombre corto y logo oficial del CDN de ESPN)
@@ -460,28 +471,39 @@ def telegram_foto(ruta: str, caption: str):
         raise RuntimeError(f"Telegram devolvio error: {respuesta}")
 
 
-def enviar_aviso(partido: dict, minutos, catalogo):
-    hora = texto_lisboa(partido["inicio"])
-    pos = posiciones_de(partido)
-    equipos = (f"{con_posicion(partido['local'], pos.get('local'))}"
-               f" vs {con_posicion(partido['visitante'], pos.get('visitante'))}")
-    if minutos is None:
-        cabecera = "⚽ ¡El partido ya ha empezado!"
-        pie = f"Empezó a las {hora} hora de Lisboa."
-    else:
-        cabecera = f"⚽ El Barça juega en {minutos} minutos"
-        pie = f"Empieza a las {hora} hora de Lisboa."
-    caption = f"{cabecera}\n{equipos}\n{pie}"
+def texto_etapa(partido: dict, eid: str, minutos, pos: dict) -> str:
+    hora = texto_lisboa(partido["inicio"], "%H:%M")  # solo hora: la fecha va en la tarjeta
+    local, visitante = partido["local"], partido["visitante"]
+    equipos = (f"{con_posicion(local, pos.get('local'))}"
+               f" vs {con_posicion(visitante, pos.get('visitante'))}")
+    if eid == "t90":
+        return (f"⚽ El Barça juega en {minutos} minutos\n{equipos}\n"
+                f"Empieza a las {hora} hora de Lisboa.")
+    if eid == "t60":
+        return f"⏰ Una hora: {local} vs {visitante} empieza a las {hora} (hora de Lisboa)."
+    if eid == "t15":
+        return f"⏳ Falta un cuarto de hora: {equipos}, {hora} hora de Lisboa."
+    comp = competicion_de(partido["competicion"])
+    extra = f" ({comp[2]})" if comp else ""
+    return f"🔴 ¡Ha empezado! {local} vs {visitante}{extra}, {hora} hora de Lisboa."
 
-    tarjeta = componer_tarjeta(partido, catalogo, minutos)
-    if tarjeta:
-        telegram_foto(tarjeta, caption)
+
+def enviar_aviso(partido: dict, eid: str, minutos, catalogo):
+    pos = posiciones_de(partido)
+    texto = texto_etapa(partido, eid, minutos, pos)
+    con_tarjeta = next(t for i, _, t in ETAPAS if i == eid)
+    if con_tarjeta:
+        tarjeta = componer_tarjeta(partido, catalogo, minutos)
+        if tarjeta:
+            telegram_foto(tarjeta, texto)
+        else:
+            try:
+                telegram("sendPhoto", photo=ESCUDO_BARCa, caption=texto)
+            except Exception:  # noqa: BLE001
+                telegram("sendMessage", text=texto)
     else:
-        try:
-            telegram("sendPhoto", photo=ESCUDO_BARCa, caption=caption)
-        except Exception:  # noqa: BLE001
-            telegram("sendMessage", text=caption)
-    print(f"  -> Telegram enviado: {cabecera}")
+        telegram("sendMessage", text=texto)
+    print(f"  -> Telegram enviado ({eid}): {texto.splitlines()[0]}")
 
 
 # --------------------------------------------------------------------------
@@ -555,26 +577,44 @@ def main() -> int:
             print("No hay proximos partidos.")
             return 0
         restan = int((sig["inicio"] - ahora).total_seconds() // 60)
-        enviar_aviso(sig, restan, catalogo)
+        pos = posiciones_de(sig)
+        print("Escalera de avisos para el proximo partido:")
+        for eid, _, _ in ETAPAS:
+            linea = texto_etapa(sig, eid, restan, pos).replace("\n", " / ")
+            print(f"  [{eid}] {linea}")
+        etapa = "t90"
+        if "--test" in sys.argv:
+            i = sys.argv.index("--test") + 1
+            if i < len(sys.argv) and sys.argv[i] in [e[0] for e in ETAPAS]:
+                etapa = sys.argv[i]
+        enviar_aviso(sig, etapa, restan, catalogo)
         print("  (modo prueba: sin marcar el estado)")
         return 0
 
     for p in partidos:
-        uid = p["uid"]
-        if uid in avisados:
+        uid, inicio = p["uid"], p["inicio"]
+        registro = avisados.get(uid) or {}
+        etapas = registro.get("etapas")
+        if etapas is None and registro:
+            # estado en formato antiguo (un solo aviso por partido): ya gestionado
+            etapas = [e[0] for e in ETAPAS]
+        etapas = list(etapas or [])
+        restan = (inicio - ahora).total_seconds() / 60
+        if restan <= -MARGEN_INICIO:
+            # demasiado tarde: no se manda "¡ha empezado!" 40 minutos despues
+            avisados[uid] = {"etapas": [e[0] for e in ETAPAS],
+                             "inicio": inicio.isoformat()}
             continue
-        inicio = p["inicio"]
-        if ahora >= inicio - timedelta(minutes=MINUTOS_AVISO) and ahora < inicio:
-            restan = int((inicio - ahora).total_seconds() // 60)
-            enviar_aviso(p, restan, catalogo)
-            avisados[uid] = {"aviso": "normal", "inicio": inicio.isoformat()}
-            enviados += 1
-        elif inicio <= ahora < inicio + timedelta(minutes=MARGEN_TARDIO):
-            enviar_aviso(p, None, catalogo)
-            avisados[uid] = {"aviso": "tardio", "inicio": inicio.isoformat()}
-            enviados += 1
-        elif ahora >= inicio + timedelta(minutes=MARGEN_TARDIO):
-            avisados[uid] = {"aviso": "perdido", "inicio": inicio.isoformat()}
+        pendiente = None
+        for eid, antes, _ in ETAPAS:
+            if restan <= antes and eid not in etapas:
+                pendiente = eid  # se queda la etapa mas cercana al inicio
+        if pendiente is None:
+            continue
+        enviar_aviso(p, pendiente, int(restan) if restan > 0 else None, catalogo)
+        etapas.append(pendiente)
+        avisados[uid] = {"etapas": etapas, "inicio": inicio.isoformat()}
+        enviados += 1
 
     with open(ESTADO_PATH, "w", encoding="utf-8") as f:
         json.dump(estado, f, ensure_ascii=False, indent=2)
