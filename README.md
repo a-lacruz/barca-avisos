@@ -1,4 +1,4 @@
-# Avisos del FC Barcelona por Telegram (en la nube)
+# Bot de Notificaciones Juegos del FC Barcelona
 
 Te avisa **1 hora antes de cada partido del primer equipo del FC Barcelona** (LaLiga, Champions, Copa del Rey...), en **hora de Lisboa**, mandándote un mensaje a **Telegram**. Funciona 24/7 con **GitHub Actions**: no necesitas que tu PC esté encendido ni ningún servidor.
 
