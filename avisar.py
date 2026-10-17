@@ -8,8 +8,11 @@ Avisos del FC Barcelona por Telegram (GitHub Actions, gratis y 24/7).
     T-60  recordatorio en texto.
     T-15  recordatorio en texto.
     T-0   aviso cuando el partido comienza.
-- AUTO-GENERA SU PROPIO CRON: solo se programa en los dias de partido
-  (T-90, T-60, T-15 y T-0) mas una comprobacion diaria.
+- VIGIA PARA EL MOMENTO EXACTO: GitHub entrega los cron programados con
+  retraso (5 h medidas en 2026-10), asi que el workflow solo tiene una
+  reserva fija cada 6 h; ese job duerme hasta la etapa siguiente y avisa
+  en el minuto exacto, y si se queda sin presupuesto encadena otro job
+  identico con workflow_dispatch (esos arrancan en segundos).
 
 Secretos: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID. Opcional: ICAL_URL.
 """
@@ -18,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -29,12 +33,10 @@ ICAL_URL = os.environ.get(
 MARGEN_INICIO = 25   # tras el inicio, aun tiene sentido avisar "¡ha empezado!"
 MARGEN_FIN = 360     # ventana para resultado y enlace tras el inicio (6 h)
 ESTADO_PATH = os.environ.get("ESTADO_PATH", "estado.json")
-WORKFLOW_PATH = os.environ.get("WORKFLOW_PATH", ".github/workflows/avisos.yml")
 CACHE_DIR = os.environ.get("CACHE_DIR", ".cache")
-HORIZON_DIAS = 10  # cuantos dias hacia delante se programan ejecuciones
 
 # escalera de avisos: (id, minutos antes del inicio, con tarjeta imagen)
-# el cron se genera a partir de aqui; cambiar tiempos = editar solo esta tabla
+# cambiar tiempos = editar solo esta tabla
 # tfin es negativo: minutos DESPUES del inicio (el partido ya ha acabado)
 ETAPAS = [
     ("t90", 90, True),
@@ -48,8 +50,12 @@ ETAPAS = [
 # tras el inicio (el aviso de resultado ya salio; el enlace llegaria aparte)
 REINTENTOS_ENLACE = [155, 210, 300, 360]
 
-# desplazamientos (minutos respecto al inicio del partido) en los que se ejecuta
-DESLAZES = [-antes for _, antes, _ in ETAPAS] + REINTENTOS_ENLACE
+
+def desplazos():
+    """(minutos tras el inicio, etapa) en los que toca mirar cada partido."""
+    sal = [(-antes, eid) for eid, antes, _ in ETAPAS]
+    sal += [(r, "enlace") for r in REINTENTOS_ENLACE]
+    return sal
 
 # --------------------------------------------------------------------------
 # Resumenes en YouTube (innertube, sin API key): orden de preferencia y filtros# --------------------------------------------------------------------------
@@ -667,97 +673,81 @@ def texto_enlace(enlace: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Cron auto-generado (solo se ejecuta cuando hay partido)
+# Vigía: el momento exacto lo marca esta ejecución, que duerme hasta el
+# siguiente aviso y se encadena a sí misma con workflow_dispatch
 # --------------------------------------------------------------------------
+#
+# Los cron programados no sirven para una hora concreta: GitHub los entrega
+# con retraso (5 h medidas en este repo del 14 al 16 de octubre de 2026).
+# El workflow solo tiene una reserva fija cada 6 h; ese job duerme hasta la
+# etapa siguiente y avisa en el minuto exacto. Si la etapa está fuera de su
+# presupuesto, lanza otro job igual con workflow_dispatch (esos arrancan en
+# segundos, no pasan por el programador) y termina.
+
+VIGIA_PRESUPUESTO = 5.5 * 3600   # Actions corta cada job a las 6 h
+VIGIA_MARGEN_SEG = 5             # llegar al umbral unos segundos después
 
 
-def generar_cron(partidos, ahora):
-    entradas = {"7 8 * * *"}  # comprobacion diaria (confirma horarios)
-    for p in partidos:
-        if p["inicio"] < ahora or p["inicio"] > ahora + timedelta(days=HORIZON_DIAS):
-            continue
-        for despl in DESLAZES:
-            momento = p["inicio"] + timedelta(minutes=despl)
-            if momento <= ahora:
-                continue
-            entradas.add(f"{momento.minute} {momento.hour} {momento.day} {momento.month} *")
-    def _clave(c):
-        minuto, hora, dia, mes, _ = c.split()
-        def num(x):
-            return int(x) if x.isdigit() else 0
-        return (num(mes), num(dia), num(hora), num(minuto))
-    return sorted(entradas, key=_clave)
-
-
-def actualizar_workflow(cron) -> bool:
-    if not os.path.exists(WORKFLOW_PATH):
-        return False
-    with open(WORKFLOW_PATH, encoding="utf-8") as f:
-        yml = f.read()
-    nuevo_bloque = "\n".join(f'    - cron: "{c}"' for c in cron)
-    patron = re.compile(r"(# CRON-INICIO.*?\n)(.*?)(\n\s*# CRON-FIN)", re.S)
-    if not patron.search(yml):
-        print("  (no se encontraron los marcadores CRON-INICIO/CRON-FIN)")
-        return False
-    yml_nuevo = patron.sub(lambda m: m.group(1) + nuevo_bloque + m.group(3), yml)
-    if yml_nuevo == yml:
-        return False
-    with open(WORKFLOW_PATH, "w", encoding="utf-8", newline="\n") as f:
-        f.write(yml_nuevo)
-    return True
-
-
-# --------------------------------------------------------------------------
-# Principal
-# --------------------------------------------------------------------------
-
-
-def main() -> int:
-    ahora = datetime.now(timezone.utc)
-    print(f"[{ahora:%Y-%m-%d %H:%M} UTC] Actualizando calendario del Barça...")
-    partidos = leer_partidos(descargar(ICAL_URL).decode("utf-8", "replace"))
-    partidos = [p for p in partidos if p["inicio"] > ahora - timedelta(minutes=MARGEN_FIN)]
-    partidos.sort(key=lambda p: p["inicio"])
-    print(f"Partidos proximos en el calendario oficial: {len(partidos)}")
-
-    catalogo = CatalogoEquipos()
-    estado = {"avisados": {}}
+def leer_estado() -> dict:
     if os.path.exists(ESTADO_PATH):
         try:
             with open(ESTADO_PATH, encoding="utf-8") as f:
-                estado = json.load(f)
+                return json.load(f)
         except Exception:  # noqa: BLE001
             pass
+    return {"avisados": {}}
+
+
+def guardar_estado(estado: dict) -> None:
+    # "latido": al cambiar la fecha se genera un commit diario, lo que impide
+    # que GitHub desactive los workflows programados por inactividad del repo
+    estado["ultima_comprobacion"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with open(ESTADO_PATH, "w", encoding="utf-8") as f:
+        json.dump(estado, f, ensure_ascii=False, indent=2)
+
+
+def proximo_momento(partidos, ahora):
+    """{momento, eid, uid} de la próxima etapa que toca mirar, o None."""
+    mejor = None
+    for p in partidos:
+        if p["inicio"] < ahora - timedelta(minutes=MARGEN_FIN):
+            continue
+        for despl, eid in desplazos():
+            momento = p["inicio"] + timedelta(minutes=despl)
+            # lo ya pasado (o a punto de pasar) lo retoma el bucle de avisos
+            if momento <= ahora + timedelta(seconds=VIGIA_MARGEN_SEG + 30):
+                continue
+            if mejor is None or momento < mejor["momento"]:
+                mejor = {"momento": momento, "eid": eid, "uid": p["uid"]}
+    return mejor
+
+
+def despachar_vigia(motivo: dict) -> bool:
+    """Lanza otra ejecución del workflow para que siga la vigilancia."""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        return False
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/avisos.yml/dispatches"
+    cuerpo = {"ref": "main", "inputs": {
+        "motivo": f"{motivo['eid']} {motivo['momento']:%Y-%m-%d %H:%M} UTC"}}
+    req = urllib.request.Request(
+        url, data=json.dumps(cuerpo).encode(),
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json", "User-Agent": "barca-avisos"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status in (200, 204)
+    except Exception as e:  # noqa: BLE001
+        print(f"  (no se pudo encadenar la vigilancia: {e})")
+        return False
+
+
+def avisar_pendientes(partidos, ahora, estado, catalogo) -> int:
+    """Envía las etapas pendientes de cada partido. Devuelve las enviadas."""
     avisados = estado.setdefault("avisados", {})
     enviados = 0
-
-    if "--test" in sys.argv or os.environ.get("PRUEBA", "").lower() == "true":
-        sig = next((p for p in partidos if p["inicio"] > ahora), None)
-        if not sig:
-            print("No hay proximos partidos.")
-            return 0
-        restan = int((sig["inicio"] - ahora).total_seconds() // 60)
-        pos = posiciones_de(sig)
-        print("Escalera de avisos para el proximo partido:")
-        for eid, _, _ in ETAPAS:
-            linea = texto_etapa(sig, eid, restan, pos).replace("\n", " / ")
-            print(f"  [{eid}] {linea}")
-        etapa = "t90"
-        if "--test" in sys.argv:
-            i = sys.argv.index("--test") + 1
-            if i < len(sys.argv) and sys.argv[i] in [e[0] for e in ETAPAS]:
-                etapa = sys.argv[i]
-        enlace = resumen_youtube(sig) if etapa == "tfin" else None
-        if etapa == "tfin" and not (resultado_de(sig) or {}).get("final"):
-            print("  (el partido aun no ha terminado: se muestra el texto, no se envia)")
-            print(f"  [tfin] {texto_etapa(sig, 'tfin', restan, {}).replace(chr(10), ' / ')}")
-            if enlace:
-                print("  [tfin] " + texto_enlace(enlace).replace(chr(10), " / "))
-            return 0
-        enviar_aviso(sig, etapa, restan, catalogo, enlace=enlace)
-        print("  (modo prueba: sin marcar el estado)")
-        return 0
-
     for p in partidos:
         uid, inicio = p["uid"], p["inicio"]
         registro = avisados.get(uid) or {}
@@ -811,22 +801,106 @@ def main() -> int:
             avisados[uid] = registro
             enviados += 1 if etapas != guardado else 0
 
-    with open(ESTADO_PATH, "w", encoding="utf-8") as f:
-        json.dump(estado, f, ensure_ascii=False, indent=2)
+    return enviados
 
-    # "latido": al cambiar la fecha se genera un commit diario, lo que impide
-    # que GitHub desactive los workflows programados por inactividad del repo
-    latido = ahora.strftime("%Y-%m-%d")
-    if estado.get("ultima_comprobacion") != latido:
-        estado["ultima_comprobacion"] = latido
-        with open(ESTADO_PATH, "w", encoding="utf-8") as f:
-            json.dump(estado, f, ensure_ascii=False, indent=2)
 
-    cron = generar_cron(partidos, ahora)
-    cambiado = actualizar_workflow(cron)
-    print(f"Ejecuciones programadas: {len(cron)}" + (" (cron actualizado)" if cambiado else ""))
+def vigia(partidos, estado, catalogo) -> int:
+    """Duerme hasta cada etapa y avisa en el minuto exacto.
+
+    En local (sin GITHUB_TOKEN) no duerme ni se encadena: solo avisa lo que
+    haya pendiente en el momento de ejecutarse.
+    """
+    if not (os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY")):
+        print("Vigia: sin GITHUB_TOKEN (ejecucion local), no se duerme.")
+        return 0
+    fin = time.time() + VIGIA_PRESUPUESTO
+    while True:
+        momento = proximo_momento(partidos, datetime.now(timezone.utc))
+        if momento is None:
+            print("Vigia: no quedan etapas por vigilar en el calendario.")
+            return 0
+        restan = (momento["momento"] - datetime.now(timezone.utc)).total_seconds()
+        puede_dormir = fin - time.time() - VIGIA_MARGEN_SEG
+        if restan > puede_dormir:
+            if restan > VIGIA_PRESUPUESTO:
+                # aun lejos: la reserva de cada 6 h la coge cuando toque
+                print(f"Vigia: {momento['eid']} es dentro de "
+                      f"{restan / 3600:.1f} h, sale la reserva de cada 6 h.")
+                return 0
+            if puede_dormir <= 60:
+                # se acaba el presupuesto con la etapa encima: otro job la sigue
+                if despachar_vigia(momento):
+                    print(f"Vigia: sin presupuesto, se encadena otra ejecucion "
+                          f"para {momento['eid']} ({momento['momento']:%H:%M} UTC).")
+                else:
+                    print("::warning::Vigia: no se pudo encadenar la ejecucion; "
+                          "la reserva de cada 6 h recogerá esta etapa.")
+                return 0
+        if restan <= puede_dormir:
+            print(f"Vigia: duermo {restan / 60:.0f} min hasta {momento['eid']} "
+                  f"({momento['momento']:%Y-%m-%d %H:%M} UTC)")
+            time.sleep(restan + VIGIA_MARGEN_SEG)
+        else:
+            # duermo lo que me queda para acercarme a la etapa y que otro
+            # job (la reserva o el que encadene) la pille a tiempo
+            print(f"Vigia: duermo {puede_dormir / 60:.0f} min; {momento['eid']} "
+                  f"queda a {(restan / 60):.0f} min.")
+            time.sleep(puede_dormir)
+        enviados = avisar_pendientes(partidos, datetime.now(timezone.utc),
+                                     estado, catalogo)
+        guardar_estado(estado)
+        if enviados:
+            print(f"Vigia: avisos enviados en esta etapa: {enviados}")
+
+
+# --------------------------------------------------------------------------
+# Principal
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    ahora = datetime.now(timezone.utc)
+    motivo = os.environ.get("MOTIVO") or "local"
+    print(f"[{ahora:%Y-%m-%d %H:%M} UTC] Actualizando calendario del Barça ({motivo})...")
+    partidos = leer_partidos(descargar(ICAL_URL).decode("utf-8", "replace"))
+    partidos = [p for p in partidos if p["inicio"] > ahora - timedelta(minutes=MARGEN_FIN)]
+    partidos.sort(key=lambda p: p["inicio"])
+    print(f"Partidos proximos en el calendario oficial: {len(partidos)}")
+
+    catalogo = CatalogoEquipos()
+    estado = leer_estado()
+
+    if "--test" in sys.argv or os.environ.get("PRUEBA", "").lower() == "true":
+        sig = next((p for p in partidos if p["inicio"] > ahora), None)
+        if not sig:
+            print("No hay proximos partidos.")
+            return 0
+        restan = int((sig["inicio"] - ahora).total_seconds() // 60)
+        pos = posiciones_de(sig)
+        print("Escalera de avisos para el proximo partido:")
+        for eid, _, _ in ETAPAS:
+            linea = texto_etapa(sig, eid, restan, pos).replace("\n", " / ")
+            print(f"  [{eid}] {linea}")
+        etapa = "t90"
+        if "--test" in sys.argv:
+            i = sys.argv.index("--test") + 1
+            if i < len(sys.argv) and sys.argv[i] in [e[0] for e in ETAPAS]:
+                etapa = sys.argv[i]
+        enlace = resumen_youtube(sig) if etapa == "tfin" else None
+        if etapa == "tfin" and not (resultado_de(sig) or {}).get("final"):
+            print("  (el partido aun no ha terminado: se muestra el texto, no se envia)")
+            print(f"  [tfin] {texto_etapa(sig, 'tfin', restan, {}).replace(chr(10), ' / ')}")
+            if enlace:
+                print("  [tfin] " + texto_enlace(enlace).replace(chr(10), " / "))
+            return 0
+        enviar_aviso(sig, etapa, restan, catalogo, enlace=enlace)
+        print("  (modo prueba: sin marcar el estado, sin vigilar)")
+        return 0
+
+    enviados = avisar_pendientes(partidos, ahora, estado, catalogo)
+    guardar_estado(estado)
     print(f"Avisos enviados en esta ejecucion: {enviados}")
-    return 0
+    return vigia(partidos, estado, catalogo)
 
 
 if __name__ == "__main__":

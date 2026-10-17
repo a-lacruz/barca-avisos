@@ -2,29 +2,22 @@ name: Avisos del FC Barcelona
 
 on:
   schedule:
-    # CRON-INICIO (generado automaticamente por avisar.py - no editar a mano)
-    - cron: "7 8 * * *"
-    - cron: "0 15 17 10 *"
-    - cron: "30 15 17 10 *"
-    - cron: "15 16 17 10 *"
-    - cron: "30 16 17 10 *"
-    - cron: "35 18 17 10 *"
-    - cron: "5 19 17 10 *"
-    - cron: "0 20 17 10 *"
-    - cron: "30 21 17 10 *"
-    - cron: "30 22 17 10 *"
-    - cron: "30 17 20 10 *"
-    - cron: "0 18 20 10 *"
-    - cron: "45 18 20 10 *"
-    - cron: "0 19 20 10 *"
-    - cron: "5 21 20 10 *"
-    - cron: "35 21 20 10 *"
-    - cron: "30 22 20 10 *"
-    - cron: "0 0 21 10 *"
-    - cron: "0 1 21 10 *"
+    # Reserva fija cada 6 h (CRON-INICIO ... CRON-FIN, se edita a mano:
+    # avisar.py ya no toca este fichero). Cada job duerme hasta la etapa
+    # siguiente y avisa en el minuto exacto: los cron no sirven para una
+    # hora concreta, GitHub los entrega con retraso (5 h medidas en 2026-10).
+    # CRON-INICIO
+    - cron: "20 0 * * *"
+    - cron: "20 6 * * *"
+    - cron: "20 12 * * *"
+    - cron: "20 18 * * *"
     # CRON-FIN
   workflow_dispatch:
     inputs:
+      motivo:
+        description: "Quien la lanza: manual, prueba o la etapa que encadena el vigia"
+        type: string
+        default: "manual"
       prueba:
         description: "Enviar un aviso de prueba sin marcar el estado"
         type: boolean
@@ -32,21 +25,26 @@ on:
 
 permissions:
   contents: write
+  # el vigia encadena la siguiente vigilancia con la API de workflow_dispatch
+  actions: write
 
+# el vigia duerme hasta la etapa siguiente, asi que las de produccion van
+# por un grupo y las de prueba por otro (si no, una prueba quedaria en cola)
 concurrency:
-  group: avisos-barca
+  group: avisos-${{ inputs.prueba == true && 'prueba' || 'produccion' }}
   cancel-in-progress: false
 
 jobs:
   avisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # un vigia puede dormir hasta 5,5 h seguidas (Actions corta el job a las 6)
+    timeout-minutes: 350
     steps:
       - name: Repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -57,35 +55,21 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
           PRUEBA: ${{ inputs.prueba }}
+          MOTIVO: ${{ inputs.motivo }}
         run: python avisar.py
 
-      - name: Guardar estado y cron
+      - name: Guardar estado
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add estado.json .github/workflows/avisos.yml
-          if git diff --cached --quiet; then
-            echo "Sin cambios que guardar."
-            exit 0
-          fi
-          git commit -m "Estado de avisos $(date -u +'%Y-%m-%d %H:%M UTC')"
-          if git push; then
-            echo "Estado y cron guardados."
-            exit 0
-          fi
-          # El GITHUB_TOKEN no puede modificar .github/workflows/* (GitHub lo
-          # exige con el scope 'workflows', que el token de Actions no tiene).
-          # Se guarda solo el estado para que la ejecucion no quede en rojo:
-          # la escalera de cron se queda como esta hasta el siguiente empuje.
-          echo "::warning::Push rechazado por tocar el workflow. Se guarda solo estado.json"
-          git reset --soft HEAD~1
-          git reset -q
           git add estado.json
           if git diff --cached --quiet; then
-            echo "Nada mas que guardar."
-            exit 0
+            echo "Sin cambios que guardar."
+          else
+            git commit -m "Estado de avisos $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git pull --rebase
+            git push
           fi
-          git commit -m "Estado de avisos $(date -u +'%Y-%m-%d %H:%M UTC') (solo estado)"
-          git push

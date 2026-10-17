@@ -23,7 +23,8 @@ Cada partido genera cinco avisos, el día del partido:
 
 ## Cómo funciona
 
-- `avisar.py` lee el calendario oficial (.ics) y **genera su propio cron**: solo se programa en los días de partido (T-90, T-60, T-15, T-0 y el resultado con reintentos del enlace) más una comprobación diaria (08:07 UTC) que confirma horarios y amplía el horizonte 10 días.
+- `avisar.py` lee el calendario oficial (.ics) y **duerme hasta el minuto exacto de cada etapa** (T-90, T-60, T-15, T-0, resultado y reintentos del enlace). El workflow solo tiene una reserva fija cada 6 h que arranca vigilias: el cron programado no sirve para una hora concreta porque GitHub lo entrega con retraso.
+- Si una vigilia se queda sin tiempo de ejecución (Actions corta cada job a las 6 h), **encadena ella misma la siguiente** con un `workflow_dispatch`, que arranca en segundos.
 - Qué avisos ya se mandaron queda guardado en `estado.json`, que el propio workflow actualiza en el repositorio.
 - Los horarios se recalculan solos: si el club cambia el horario de un partido, los avisos se ajustan.
 
@@ -59,12 +60,12 @@ ETAPAS = [
 ]
 ```
 
-Al cambiarla, el cron y los mensajes se adaptan solos en la siguiente ejecución.
+Al cambiarla, los mensajes y los momentos en los que duerme el vigía se adaptan solos en la siguiente ejecución: no hay cron que regenerar.
 
 ## Notas
 
 - Los workflows con `schedule` solo se ejecutan en la rama por defecto (`main`).
-- GitHub puede retrasar unos minutos la ejecución programada.
+- Un cron programado **no sirve para una hora concreta**: GitHub lo entrega con retraso (se han medido 5 h en este repositorio). Por eso la hora exacta la marca el vigía, que duerme dentro de la ejecución; la reserva de cada 6 h solo sirve para arrancarle (o para reparar la cadena si algo falla).
 - Si un repositorio está 60 días sin actividad, GitHub desactiva sus workflows programados; aquí los commits diarios de `estado.json` mantienen la actividad.
 - El token y el chat id nunca se guardan en el código: van en los Secretos.
 - Para dibujar las tarjetas se usa Pillow (lo instala el propio workflow).
