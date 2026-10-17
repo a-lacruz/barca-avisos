@@ -1,4 +1,13 @@
 {
-  "avisados": {},
+  "avisados": {
+    "6a4455ea54aa8848aa0baaf0": {
+      "etapas": [
+        "t90",
+        "t60",
+        "t15"
+      ],
+      "inicio": "2026-10-17T16:30:00+00:00"
+    }
+  },
   "ultima_comprobacion": "2026-10-17"
 }
