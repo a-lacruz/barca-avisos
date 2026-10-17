@@ -6,12 +6,11 @@ import json
 import sys
 import urllib.request
 
-CLAVE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 VERSION = "2.20261013.00.00"
 
 
 def datos_video(video_id):
-    url = f"https://www.youtube.com/youtubei/v1/player?key={CLAVE}"
+    url = "https://www.youtube.com/youtubei/v1/player"
     cuerpo = {"videoId": video_id,
               "context": {"client": {"clientName": "WEB", "clientVersion": VERSION}}}
     req = urllib.request.Request(

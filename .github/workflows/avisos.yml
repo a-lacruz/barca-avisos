@@ -32,6 +32,9 @@ on:
 
 permissions:
   contents: write
+  # avisar.py reescribe su propio bloque de cron, así que el token necesita
+  # tambien workflows: write (si no, GitHub rechaza el push del .yml)
+  workflows: write
 
 concurrency:
   group: avisos-barca

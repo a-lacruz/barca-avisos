@@ -3,7 +3,6 @@ import json
 import sys
 import urllib.request
 
-CLAVE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 VERSION = "2.20261013.00.00"
 
 
@@ -16,7 +15,7 @@ def _post(url, datos):
 
 
 def buscar(consulta, cantidad=10):
-    url = f"https://www.youtube.com/youtubei/v1/search?key={CLAVE}"
+    url = "https://www.youtube.com/youtubei/v1/search"
     ctx = {"client": {"clientName": "WEB", "clientVersion": VERSION}}
     r = _post(url, {"query": consulta, "context": ctx})
     resultados = []

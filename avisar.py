@@ -559,7 +559,6 @@ def enviar_aviso(partido: dict, eid: str, minutos, catalogo, enlace=None):
 # Resumen del partido en YouTube (innertube, sin API key)
 # --------------------------------------------------------------------------
 
-_YT_CLAVE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"  # clave publica del sitio
 _YT_VERSION = "2.20261013.00.00"
 
 
@@ -573,7 +572,7 @@ def _yt_post(url: str, datos: dict):
 
 def _yt_buscar(consulta: str, cantidad: int = 25):
     """[{id, titulo, canal, retardo}] de una busqueda de YouTube."""
-    url = f"https://www.youtube.com/youtubei/v1/search?key={_YT_CLAVE}"
+    url = "https://www.youtube.com/youtubei/v1/search"
     ctx = {"client": {"clientName": "WEB", "clientVersion": _YT_VERSION}}
     r = _yt_post(url, {"query": consulta, "context": ctx})
     res = []
@@ -604,7 +603,7 @@ def _yt_buscar(consulta: str, cantidad: int = 25):
 def _yt_duracion(video_id: str):
     """Duracion en segundos, o None si no se pudo leer."""
     try:
-        url = f"https://www.youtube.com/youtubei/v1/player?key={_YT_CLAVE}"
+        url = "https://www.youtube.com/youtubei/v1/player"
         ctx = {"client": {"clientName": "WEB", "clientVersion": _YT_VERSION}}
         d = _yt_post(url, {"videoId": video_id, "context": ctx})
         largo = d.get("microformat", {}).get("playerMicroformatRenderer", {}).get(

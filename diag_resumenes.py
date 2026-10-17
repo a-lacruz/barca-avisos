@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import avisar  # noqa: E402
 
-CLAVE = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 VERSION = "2.20261013.00.00"
 
 # canales preferidos: primero los globales; DAZN Portugal es geo-bloqueado
