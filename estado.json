@@ -43,10 +43,12 @@
       "etapas": [
         "t90",
         "t60",
-        "t15"
+        "t15",
+        "t0",
+        "tfin"
       ],
       "inicio": "2026-11-03T20:00:00+00:00"
     }
   },
-  "ultima_comprobacion": "2026-11-03"
+  "ultima_comprobacion": "2026-11-04"
 }
