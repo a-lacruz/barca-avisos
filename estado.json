@@ -58,7 +58,14 @@
         "tfin"
       ],
       "inicio": "2026-11-08T20:00:00+00:00"
+    },
+    "6a4455ea54aa8848aa0baaf4": {
+      "etapas": [
+        "t90",
+        "t60"
+      ],
+      "inicio": "2026-11-22T13:00:00+00:00"
     }
   },
-  "ultima_comprobacion": "2026-11-21"
+  "ultima_comprobacion": "2026-11-22"
 }
